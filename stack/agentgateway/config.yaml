@@ -1,0 +1,31 @@
+# agentgateway v1.7.0 standalone config for the build box (ADR 26-11-03-004). Deployed by scripts/lid/stack_up.sh to
+# /etc/epistemic-stack/agentgateway.yaml (root-owned, read-only to the service). Do not edit on the box (ADR 26-11-03-001).
+# stack_up checks that the bind address, port and targets below match stack/stack.yaml before it installs this file.
+#
+# No credential lives here. The GitHub token stays in ToolHive's store and its container; the gateway only forwards to the
+# ToolHive proxies on loopback. SESSION_KEY (which encrypts MCP session ids) comes from /etc/epistemic-stack/agw.env through
+# systemd, so agentgateway never writes a generated key back into this file (its default when no key is set).
+config:
+  adminAddr: "unix:/run/epistemic-agw/admin.sock"        # no TCP admin/UI; the socket dir is 0750 epi-agw, not reachable by uid 1000
+  readinessAddr: "unix:/run/epistemic-agw/ready.sock"    # stack_up/stack_test probe it as root
+  statsAddr: "off"
+gateways:
+  default:
+    bindAddress: "@INTERNAL_IP@"   # host.internal_ip, rendered by stack_units.py render-agw
+    port: 18800
+mcp:
+  prefixMode: always          # tool names are always <target>_<tool>, so they don't change if a target is added or drops out
+  failureMode: failOpen       # a failing target (e.g. github with an expired token) drops out; the others still serve
+  policies:
+    mcpAuthorization:
+      rules:
+      # Defence in depth behind github-mcp-server's GITHUB_READ_ONLY=1: only our two targets, and no tool whose name reads
+      # as a write. A denied call returns JSON-RPC -32602 "unknown resource"; the access log says "authorization denied".
+      - allow: 'mcp.tool.target in ["time", "github"] && !mcp.tool.name.matches("^(create|update|delete|merge|push|add|fork|assign|request|submit|dismiss|rerun|cancel|run|star|unstar|mark|manage|reprioritize)_|_write$")'
+  targets:
+  - name: time
+    mcp:
+      host: http://127.0.0.1:18810/mcp
+  - name: github
+    mcp:
+      host: http://127.0.0.1:18811/mcp

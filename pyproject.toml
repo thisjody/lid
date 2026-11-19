@@ -1,0 +1,6 @@
+# Test and mutation-testing configuration only; lid is scripts, not a Python package.
+[tool.mutmut]
+source_paths = ["scripts/lid/route_lock.py", "scripts/lid/loopback_listeners.py", "tests/soak/verdict.py", "tests/soak/box_status.py", "scripts/lid/job_sweep.py", "scripts/monitor/disco_fan_lib/safe_untar.py", "scripts/monitor/disco_fan_lib/lockcheck.py"]
+also_copy = ["scripts/", "tests/", "stack/"]   # soak.py reads stack/stack.yaml (pool.max_boxes) at import
+pytest_add_cli_args = ["-p", "no:cacheprovider", "-x"]
+pytest_add_cli_args_test_selection = ["tests/test_route_lock.py", "tests/test_inprocess.py", "tests/test_loopback_listeners.py", "tests/test_soak_verdict.py", "tests/test_soak_dryrun.py", "tests/test_job_sweep.py", "tests/test_soak_box_status.py", "tests/test_mutation_pins.py"]

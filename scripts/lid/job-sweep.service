@@ -1,0 +1,8 @@
+[Unit]
+Description=Close build-box jobs whose worker died without == done (reboot, OOM, kill): audit, archive, close the log
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -I %h/stack/repo/scripts/lid/job_sweep.py
+TimeoutStartSec=3600

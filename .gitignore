@@ -1,0 +1,5 @@
+stack/site.yaml
+__pycache__/
+*.pyc
+VERIFICATION_PLAN.md
+evidence/

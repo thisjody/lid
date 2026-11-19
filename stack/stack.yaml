@@ -1,0 +1,144 @@
+# The composed stack: the source of truth for what runs on the build box (ADR 26-11-03-001).
+# Install only through scripts/lid/stack_up.sh. Check drift and upgrades with scripts/lid/stack_check.sh.
+# Prove the composition's claims with scripts/lid/stack_test.sh. Last test run: stack/TEST_LOG.md.
+# The site's own values (box name, GCP project and zone, address, user, commit identity, install ids) are in stack/site.yaml,
+# which is not committed; copy stack/site.example.yaml. scripts/lid/stack_units.py merges it in at the same paths.
+host:
+  machine: n1-standard-8         # with nested virtualization (libkrun needs /dev/kvm)
+  os: debian-12
+  idle_shutdown:
+    config: [scripts/lid/idle_shutdown.sh]   # installed to /usr/local/sbin, root cron every 5 min (ADR 26-11-03-003)
+    health: "test -x /usr/local/sbin/idle_shutdown.sh && grep -q idle_shutdown /etc/cron.d/idle_shutdown"
+components:
+  - name: discobox
+    role: job sandboxes; Claude boxes on Discobox's own egress defaults, command boxes deny-by-default; secrets swapped at the proxy, never inside the box
+    upstream: https://github.com/discobox-ai/discobox
+    license: Apache-2.0
+    pin: {tag: v0.19.1, sha: 3f47653772b1bc496cee4cd97ba8bb282991b5a7}   # held 2026-11-17: v0.19.5 tried and not taken (parallel Claude jobs, stack/GAPS.md G15); libkrun 1.19.0, passt 2025_09_19 (Nix-built)
+    pin_previous: {tag: v0.18.0, sha: 8f87ada29edd6bc2371d8d9abf6fef5406838ef5}
+    install:   # scripts/lid/discobox_up.sh, run by stack_up step 0 (ADR 26-11-17-001); was by hand 10/24
+      client: {asset: discobox-linux-amd64, sha256: 7a9cf6ae7a07acbd4021bf2d336a908ac13728e356af0daaba296849164f3953}
+      server: {asset: discobox-server-linux-amd64, sha256: ae21b30fc95f83fa20119d3c23b4e003a6c29ef77af74aaa44b23e96a3920f3b}
+      nix: {installer: https://releases.nixos.org/nix/nix-2.35.4/install, sha256: 118c3dfa04bdc946b3f577365b9a295607142c9b920e2c07b184e266d62b1ee1}
+      runtime: "github:discobox-ai/discobox/<pin.sha>#libkrun-runtime"   # libkrun + passt, Nix-built (Debian 12 can't package them)
+    provider: {type: libkrun, data_disk_gib: 40, cache_disk_gib: 15}
+    adr: [26-11-02-001, 26-11-02-002, 26-11-06-001, 26-11-10-001]
+    # max_boxes: measured 2026-11-18 (row i, reproduced): this pool starts 8 boxes and the 9th dies before its sandbox agent
+    # is healthy. Fan jobs are capped by it; Claude jobs by MAXBOX (6) in disco_job.sh, counted against all live boxes.
+    pool: {name: krun, vcpus: 6, memory_gib: 20, max_boxes: 8}   # its id and provider id are per install (site.yaml); resizing replaces the VM: only with zero live boxes
+    claude_secret_name: Claude API via WIF
+    # claude_secret: per install, in site.yaml (discobox_up.sh creates it and prints its id); its route lock: scripts/lid/route_lock.py (ADR 26-11-10-001)
+    command_harness: shell   # disco_fan.sh command jobs: built-in shell harness, 0 bound secrets, per-box --egress-deny-by-default
+    config: [scripts/monitor/disco_job.sh, scripts/monitor/disco_fan.sh, scripts/lid/wif_token.sh, scripts/lid/wif-refresh.service, scripts/lid/wif-refresh.timer]
+    health: "discobox version (client and server == pin.tag); systemctl --user is-active wif-refresh.timer"
+    invariants: [no credential inside a job sandbox, the Claude credential routes to exactly api.anthropic.com on the secret and on its binding, connectors off with any connector traffic failing the job, Claude boxes on Discobox's own egress defaults (ADR 26-11-10-001; supersedes the 10/30 harness deny-by-default), command boxes deny-by-default with any exchange after provisioning failing the job]
+  - name: podman
+    role: container runtime for ToolHive (rootless, user socket; no /var/run/docker.sock for Discobox's dormant Docker provider to find)
+    # Built from the pinned upstream tag on the box (ADR 26-11-03-002, amendment 2026-11-04). Debian 12's apt podman 4.3.1
+    # let a container's --dns REPLACE aardvark-dns (podman#16172, fixed in 4.4.0), so thv's isolated github container could
+    # not resolve its egress proxy by name. Debian 12 (incl. backports) has nothing newer; Kubic has no Debian_12 repo.
+    upstream: https://github.com/podman-container-tools/podman   # moved from containers/podman (GitHub transfer redirect)
+    license: Apache-2.0
+    pin: {tag: v5.8.9, sha: 40030f4073bd4e1bf4f2fd9df2f6952b4d9d350a}   # 5.x maintained line; 6.x needs netavark/aardvark 2.0
+    install: /usr/local/bin/podman
+    build:
+      go: {version: go1.26.10, asset: go1.26.10.linux-amd64.tar.gz, sha256: ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5}   # build-only, from go.dev, removed after the build
+      tags: "seccomp systemd exclude_graphdriver_btrfs exclude_graphdriver_devicemapper containers_image_openpgp"
+      rust: {version: 1.90.0, asset: rust-1.90.0-x86_64-unknown-linux-gnu.tar.xz, sha256: bff8974f2d3ee6c0e6ac926b533f65bbdd3697d2c2b925bdae5f45b9eed10a67}   # build-only (netavark MSRV 1.86), from static.rust-lang.org, removed after the build
+      packages: [git, make, gcc, pkg-config, libseccomp-dev, libsystemd-dev, protobuf-compiler, xz-utils]
+    helpers_dir: /usr/local/libexec/podman   # rootlessport (from the build), netavark, aardvark-dns, crun (podman's runtime)
+    helpers:
+      # netavark: built from the tag + its release vendor tarball (the release binary needs GLIBC_2.39; Debian 12 has 2.36)
+      netavark: {tag: v1.17.2, sha: bd7a464482bcc02dca4843c457db584ed7fe14e4, upstream: https://github.com/containers/netavark, build: source, vendor: netavark-v1.17.2-vendor.tar.gz, vendor_sha256: afa8e99a9691ef6ea485d6cb6b1897684d9f8a26719deaa3cbf37b5f17198e6f}
+      # aardvark-dns: the release binary needs only GLIBC <= 2.34, so it is used as published
+      # crun: Debian 12's 1.8.1 rejects podman 5.8's OCI spec version ("unknown version specified"); upstream's static build,
+      # sha256 pinned here after its .asc verified as "Giuseppe Scrivano" (key AF60FCA3CDAA6DEAD157EA3A67E38F7A8BA21772)
+      crun: {tag: "1.31", upstream: https://github.com/containers/crun, build: binary, asset: crun-1.31-linux-amd64, sha256: 8cacae171bb0e5f9e275adac2eeb2c6ec8c69fdedff7b008eadd8cdd25b0d349}   # 11/17: past GHSA-2mxx-58qc-p466 (high; rootful checkpoint/restore only) + GHSA-jj7h-4c3m-j6wf (medium; kernels < 5.12) - neither reached us
+      aardvark-dns: {tag: v1.17.1, upstream: https://github.com/containers/aardvark-dns, build: binary, asset: aardvark-dns.gz, sha256: 4bfbc01eabd2f64a8228cf00b178885d927f68f7e24fdecc905dde39af8de7f6}
+    replaces_apt: [podman, netavark, aardvark-dns]   # Debian 12's 4.3.1 / 1.4.0, purged after `podman system reset` (thv re-creates its containers)
+    packages: [conmon, catatonit, uidmap, slirp4netns, golang-github-containers-common, golang-github-containers-image, keyutils, python3-yaml]   # runtime deps, Debian 12 apt
+    rootless_network_cmd: slirp4netns   # Debian 12's passt is too old for podman 5's pasta
+    adr: [26-11-03-002]
+    health: "systemctl --user is-active podman.socket && podman info (NetworkBackend netavark); podman version == pin.tag"
+    invariants: [no root Docker daemon on the host, a container's --dns servers are aardvark-dns upstreams (container names resolve on isolated networks)]
+  - name: toolhive
+    role: MCP tool layer; tool containers hold the credentials, jobs hold none
+    upstream: https://github.com/stacklok/toolhive
+    license: Apache-2.0
+    pin:
+      tag: v0.66.0       # 2026-11-17: 0.65/0.66 are auth-server work we don't use + opt-in read-only rootfs; usage metrics turned off. Was v0.64.0 (11/10: past GHSA-v869-pp2g-ff4q + GHSA-v9xx-q4mg-gwmv)
+      sha: 74fbd9b6b04151fc98ecfa640c026ddb8cdd769f   # the commit (tag^{}), as thv version reports it
+      asset: toolhive_0.66.0_linux_amd64.tar.gz
+      sha256: 850bae2a19a7a7080f8b9376d96f66a125fe276ca17cfe5730dcaac95a24378f   # = release API digest = toolhive_0.66.0_checksums.txt
+    install: ~/.local/bin/thv
+    bind: 127.0.0.1      # proxies listen on loopback only; jobs reach them through agentgateway (ADR 26-11-03-004)
+    # thv's egress proxy, pinned (ADR 26-11-17-002 amendment): the release tag matching the thv pin, by digest, cosign-verified
+    # on the box 2026-11-17 for v0.64.0 and v0.66.0 (keyless; certificate identity ^https://github.com/stacklok/toolhive/, issuer GitHub Actions, in Rekor).
+    # Image: alpine + squid from alpine edge (containers/egress-proxy/Dockerfile). Bump it with the thv pin.
+    egress_image: ghcr.io/stacklok/toolhive/egress-proxy:v0.66.0@sha256:b8cc0b01d652a64d72db1a23c9b10fe1b89cf04f97c0e746957d8ec1703a8301
+    aux_images:          # pulled by thv itself as :latest for --isolate-network (dnsmasq has no override in thv v0.64.0); the digest we last
+                         # reviewed. stack_check flags a change with "!" (review, then update here). Recorded 2026-11-10 on thv v0.64.0.
+      dnsmasq: sha256:d4bc11faaf3a4354f5121250e21831801de64c3f6bf94ddf60bb7104513ea801
+    secrets_provider: encrypted   # master password: ~/.config/epistemic-stack/thv_master (0600), primed into the kernel user keyring at unit start
+    adr: [26-11-03-002]
+    patched: null        # step 2: our required-scopes build, unpatch_when "upstream merge + release"
+    config: [scripts/lid/stack_up.sh, scripts/lid/stack_secret.sh, scripts/lid/stack_test.sh, scripts/lid/stack_check.sh]
+    servers:
+      - name: time          # the no-secret, no-network test server (proves the plumbing)
+        image: ghcr.io/stacklok/dockyard/uvx/mcp-server-time:2026.10.10
+        digest: sha256:2d0d3ef8c7bd7d5038b331418d9db42f084ac7243224052662f8c3ee616b9acb
+        upstream: https://github.com/modelcontextprotocol/servers
+        transport: stdio
+        permission_profile: none   # built-in profile: container has no network
+        isolate_network: false     # nothing to isolate; avoids thv's unpinned :latest dnsmasq/egress-proxy helper images
+        port: 18810
+        env: {}
+        secret: null
+        unit: thv-time.service
+        health: "MCP tools/list over http://127.0.0.1:18810/mcp (as root) returns get_current_time"
+      - name: github
+        image: ghcr.io/github/github-mcp-server:v2.1.0
+        digest: sha256:f6056fc10bfffcc8c81a6417a2e9ca12808647e8dd6049642a4feaadee0e0f8a
+        upstream: https://github.com/github/github-mcp-server
+        transport: stdio
+        permission_profile:           # ToolHive's registry profile for github, enforced by its egress proxy (--isolate-network)
+          network: {outbound: {insecure_allow_all: false, allow_host: [.github.com, .githubusercontent.com], allow_port: [443]}}
+        isolate_network: true         # thv adds <name>-dns (dockurr/dnsmasq:latest) + <name>-egress/-ingress (ghcr.io/stacklok/toolhive/egress-proxy:latest); tags unpinnable upstream, digests reported by stack_check
+        port: 18811
+        env: {GITHUB_READ_ONLY: "1", GITHUB_TOOLSETS: "context,repos,issues,pull_requests,actions"}
+        secret: github-readonly       # fine-grained PAT, public repos, read-only; loaded by scripts/lid/stack_secret.sh (value from stdin, never stored in the repo)
+        secret_env: GITHUB_PERSONAL_ACCESS_TOKEN
+        secret_expires: 2027-02-01          # YYYY-MM-DD; set by stack_secret.sh --expires; stack_check warns 14 days before
+        unit: thv-github.service      # enabled only once the secret exists
+        health: "MCP tools/list over http://127.0.0.1:18811/mcp (as root) lists only read tools"
+    health: "systemctl --user is-active thv-<server>.service; tools/list through each proxy"
+    invariants: [proxies on loopback only and refused to uid 1000, no GitHub credential in sandbox env or fs, tool cannot write]
+  - name: uv
+    role: Python resolver for disco_fan.sh --deps (the wheelhouse is resolved and downloaded on the host, binary wheels only)
+    upstream: https://github.com/astral-sh/uv
+    license: Apache-2.0 OR MIT
+    pin: {tag: 0.13.7, sha: 316c827e058c16b71d5c507a20729c2995a7bcce, asset: uv-x86_64-unknown-linux-gnu.tar.gz, sha256: c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83}   # = the release's .sha256 file
+    install: ~/.local/bin/uv
+    pip_lock: scripts/monitor/disco_fan_lib/pip.lock   # pip for `pip download`, installed into a throwaway venv by hash
+    adr: [26-11-06-001, 26-11-17-002]
+    invariants: [no package is built from source on the host, every tool the wheelhouse step runs is pinned by hash]
+  - name: agentgateway
+    role: MCP gateway; one endpoint for jobs that multiplexes the ToolHive servers; CEL tool authorization and a per-call access log
+    upstream: https://github.com/agentgateway/agentgateway
+    license: Apache-2.0
+    pin:
+      tag: v1.7.0
+      sha: 26f5aebe99a36a037fe54f8080a608aca5547e15
+      asset: agentgateway-linux-amd64
+      sha256: 1b2fc01a2de29ca113bbb6258b5cae7b1eb3c724071c09d687a449132f2f42f8
+    install: /usr/local/bin/agentgateway
+    user: epi-agw                 # system user, so EPI_STACK can tell the gateway apart from uid 1000 (Discobox, passt)
+    unit: epistemic-agw.service   # system unit, hardened (ProtectSystem=strict, NoNewPrivileges, no capabilities)
+    port: 18800                   # on host.internal_ip; the only stack port a sandbox can reach
+    path: /mcp
+    targets: [time, github]       # must match stack/agentgateway/config.yaml (stack_up checks)
+    session_key: /etc/epistemic-stack/agw.env   # SESSION_KEY (MCP session-id encryption), 0600 root, random, made by stack_up
+    adr: [26-11-03-004]
+    config: [stack/agentgateway/config.yaml, scripts/lid/stack_up.sh, scripts/lid/stack_test.sh, scripts/monitor/disco_job.sh]
+    health: "systemctl is-active epistemic-agw.service; /healthz/ready on /run/epistemic-agw/ready.sock; tools/list on http://<host.internal_ip>:18800/mcp lists every target"
+    invariants: [lists tools from every target, sandbox reaches ToolHive only through it, no credential in its config or environment, write tools absent and refused, gateway itself reaches only the ToolHive loopback ports]

@@ -1,0 +1,15 @@
+# Copy to stack/site.yaml (not committed) and fill in. stack_units.py merges these over stack/stack.yaml at the same paths.
+host:
+  name: my-build-box               # the GCE instance name; its hostname at boot
+  rebuild_name: my-build-box-next  # optional: a second name for a replacement box stood up from nothing (LID_INSTANCE=...)
+  project: my-gcp-project
+  zone: us-central1-a
+  internal_ip: 10.0.0.5           # the only non-loopback address a stack service listens on (agentgateway)
+  user: builder                    # the box user (uid 1000, lingering); every stack service is a systemd user unit of it
+  commit_name: Your Name           # box job commits are authored as this, never as the agent
+  commit_email: you@example.com
+  refuse_patterns: []              # command substrings lid_run.sh refuses outright, e.g. another project's host names
+components:
+  discobox:
+    pool: {id: pool_xxxxxxxxxxxxxxxx, provider: prov_xxxxxxxxxxxxxxxx}   # recorded after the first stack_up (discobox_up.sh prints them)
+    claude_secret: sec_xxxxxxxxxxxxxxxx                                # likewise
