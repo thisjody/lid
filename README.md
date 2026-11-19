@@ -65,7 +65,8 @@ a box install what it needs at boot). So a job's code and output could leave the
   `Bearer` header, as an `x-api-key` header and in a JSON body). It passes only if the real token never arrives.
 - `scripts/lid/route_lock.py --self-test` covers the route lock's cases.
 
-What has been tested, how, and what hasn't, is in `VERIFICATION.md`. The checks ran on the pre-publication commits; this
+How it was verified, and what that found, is in [`docs/HOW-IT-WAS-VERIFIED.md`](docs/HOW-IT-WAS-VERIFIED.md). What has been
+tested, how, and what hasn't, is in `VERIFICATION.md`. The checks ran on the pre-publication commits; this
 commit differs from them only in comments, docs and test selection.
 
 ## Capacity (measured, see `VERIFICATION.md`)
