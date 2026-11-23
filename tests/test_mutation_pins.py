@@ -306,7 +306,7 @@ class DB:
         self.audits.append((jobdir, i))
 
 
-def mkjob(root, name, log, audit=False, conf='REPO=x\n'):
+def mkjob(root, name, log, audit=True, conf='REPO=x\n'):
     d = root / name
     (d / 'job').mkdir(parents=True)
     (d / 'logs').mkdir()
@@ -352,13 +352,13 @@ def test_listing_error_message():
 def test_discobox_wrapper(tmp_path):
     log = tmp_path / 'calls'
     exe = tmp_path / 'discobox'
-    exe.write_text(f'#!/bin/sh\necho "$@" >> {log}\ncase "$1" in ls) echo \'{{"sandboxes": []}}\';; shell) exit 0;; rm) exit 0;; esac\n')
+    exe.write_text(f'#!/bin/sh\necho "$@" >> {log}\n[ "$1" = --auto-start-server=false ] && shift\ncase "$1" in ls) echo \'{{"sandboxes": []}}\';; shell) exit 0;; rm) exit 0;; esac\n')
     exe.chmod(0o755)
     db = js.Discobox(str(exe))
     assert db.ls() == {'sandboxes': []}
     db.rm('a')
     db.stop_agent('b')
-    assert log.read_text().splitlines() == ['ls -o json', 'rm a', 'shell b -- sudo -n systemctl stop job-agent']
+    assert log.read_text().splitlines() == ['--auto-start-server=false ls -o json', '--auto-start-server=false rm a', '--auto-start-server=false shell b -- sudo -n systemctl stop job-agent']
     bad = tmp_path / 'bad'
     bad.write_text('#!/bin/sh\necho oops >&2\nexit 1\n'); bad.chmod(0o755)
     with pytest.raises(RuntimeError, match='discobox ls failed: oops'):

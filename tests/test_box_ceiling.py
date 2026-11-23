@@ -73,7 +73,7 @@ def test_box_room_refuses_at_the_ceiling(tmp_path):
                                     ('scripts', 'lid', 'claude_canary.sh')])
 def test_lock_holding_creators_check_the_ceiling_before_creating(script):
     s = open(os.path.join(ROOT, *script)).read()
-    create = re.search(r'timeout -k \d+ \d+ discobox (admin box create|new --from-json)', s).start()
+    create = re.search(r'timeout -k \d+ \d+ discobox --auto-start-server=false (admin box create|new --from-json)', s).start()
     lock = s.rfind('flock -w 1800 9', 0, create)
     assert lock != -1 and 'box_room' in s[lock:create], script
 

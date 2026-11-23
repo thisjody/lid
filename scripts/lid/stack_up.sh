@@ -375,16 +375,19 @@ for u in wif-refresh.service wif-refresh.timer; do sed "s/@CLAUDE_SECRET@/$CS/" 
 systemctl --user daemon-reload; systemctl --user enable -q --now wif-refresh.timer
 systemctl --user is-active -q wif-refresh.timer && ok "wif-refresh.timer" || bad "wif-refresh.timer"
 # The orphaned-job sweep (job_sweep.py): a reboot or a killed worker leaves a job with no == done and live boxes.
+for u in discobox-ensure.service discobox-ensure.timer; do cmp -s "$L/$u" "$HOME/.config/systemd/user/$u" || { install -m 0644 "$L/$u" "$HOME/.config/systemd/user/$u"; chg "$u"; }; done
+systemctl --user daemon-reload; systemctl --user enable -q --now discobox-ensure.timer
+systemctl --user is-active -q discobox-ensure.timer && ok "discobox-ensure.timer" || bad "discobox-ensure.timer"
 for u in job-sweep.service job-sweep.timer; do cmp -s "$L/$u" "$HOME/.config/systemd/user/$u" || { install -m 0644 "$L/$u" "$HOME/.config/systemd/user/$u"; chg "$u"; }; done
 systemctl --user daemon-reload; systemctl --user enable -q --now job-sweep.timer
 systemctl --user is-active -q job-sweep.timer && ok "job-sweep.timer" || bad "job-sweep.timer"
 DT=$(get components.discobox.pin.tag)
-dv=$(discobox version 2>&1 | awk '{print $NF}' | sort -u | tr '\n' ' '); [ "$dv" = "$DT " ] && ok "discobox $DT (client+server)" || bad "discobox versions: $dv (pin $DT)"
+dv=$(discobox --auto-start-server=false version 2>&1 | awk '{print $NF}' | sort -u | tr '\n' ' '); [ "$dv" = "$DT " ] && ok "discobox $DT (client+server)" || bad "discobox versions: $dv (pin $DT)"
 # ADR 26-11-10-001: Claude boxes run Discobox's own provisioning defaults, so the claude-code harness carries
 # no egress override of ours; the lock is the credential route, exactly api.anthropic.com on the secret and its binding.
-eg=$(discobox admin harnesses get claude-code -o json | python3 -I -c 'import json,sys;e=json.load(sys.stdin).get("egress") or {};print(int(bool(e.get("denyByDefault") or e.get("allow"))))')
-[ "$eg" = 0 ] || { discobox admin harnesses update claude-code --egress-deny-by-default=false --clear-egress-allow >/dev/null && chg "claude-code harness egress -> Discobox default"; }
-eg=$(discobox admin harnesses get claude-code -o json | python3 -I -c 'import json,sys;e=json.load(sys.stdin).get("egress") or {};print(int(bool(e.get("denyByDefault") or e.get("allow"))))')
+eg=$(discobox --auto-start-server=false admin harnesses get claude-code -o json | python3 -I -c 'import json,sys;e=json.load(sys.stdin).get("egress") or {};print(int(bool(e.get("denyByDefault") or e.get("allow"))))')
+[ "$eg" = 0 ] || { discobox --auto-start-server=false admin harnesses update claude-code --egress-deny-by-default=false --clear-egress-allow >/dev/null && chg "claude-code harness egress -> Discobox default"; }
+eg=$(discobox --auto-start-server=false admin harnesses get claude-code -o json | python3 -I -c 'import json,sys;e=json.load(sys.stdin).get("egress") or {};print(int(bool(e.get("denyByDefault") or e.get("allow"))))')
 [ "$eg" = 0 ] && ok "claude-code harness egress: Discobox default" || bad "claude-code harness egress drifted from Discobox default"
 rl=$(python3 "$L/route_lock.py" "$(get components.discobox.claude_secret)") && ok "claude credential: $rl" || bad "claude credential: $rl"
 # Claude Code runs in a fresh Claude box (stack/GAPS.md G10): the pool provisions it once and reuses it, and a fresh pool

@@ -13,7 +13,7 @@ BOX=
 if [ "$st" = RUNNING ]; then
   BOX=$(bash "$R/scripts/lid_run.sh" 'export XDG_RUNTIME_DIR=/run/user/$(id -u) PATH=$HOME/.local/bin:$PATH
     echo "toolhive $(thv version 2>/dev/null | awk "/^ToolHive/{print \$2}")"
-    echo "discobox $(discobox version 2>/dev/null | awk "{print \$NF}" | sort -u | tr "\n" ",")"
+    echo "discobox $(discobox --auto-start-server=false version 2>/dev/null | awk "{print \$NF}" | sort -u | tr "\n" ",")"
     echo "agentgateway v$(/usr/local/bin/agentgateway -V 2>/dev/null | awk "{print \$NF}")"; echo "unitsys epistemic-agw.service $(systemctl is-active epistemic-agw.service)"
     echo "podman v$(podman version --format "{{.Client.Version}}" 2>/dev/null)"
     for h in netavark aardvark-dns crun; do echo "$h $(/usr/local/libexec/podman/$h --version 2>/dev/null | awk "NR==1{print \$NF}")"; done

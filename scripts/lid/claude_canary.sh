@@ -22,9 +22,9 @@ trap done_ EXIT; trap 'exit 130' INT TERM
 mkdir -p "$HOME/scratch"; exec 9>>"$HOME/scratch/.box-cap.lock"
 . "$(dirname "${BASH_SOURCE[0]}")/stack_lib.sh"   # box_room: the pool's measured box ceiling
 
-listing(){ timeout 300 discobox ls -o json 2>/dev/null; }
+listing(){ timeout 300 discobox --auto-start-server=false ls -o json 2>/dev/null; }
 rm_box(){ local t st
-  for t in 1 2 3 4 5 6; do timeout 600 discobox rm "$1" >/dev/null 2>&1
+  for t in 1 2 3 4 5 6; do timeout 600 discobox --auto-start-server=false rm "$1" >/dev/null 2>&1
     sleep 5; st=$(listing | python3 -I -c 'import json,sys; i=sys.argv[1]; d=json.load(sys.stdin); print(next(((b.get("runtime") or {}).get("state") for b in d["sandboxes"] or [] if b["id"]==i), "gone"))' "$1")
     case "$st" in archived|deleted|gone) return 0;; esac
   done; echo "canary box $1 NOT removed (state $st after 6 tries): LEAK"; return 1; }
@@ -49,7 +49,7 @@ check(){ local v up= rc=1
   before=$(ids) || { flock -u 9; echo "the box listing could not be read"; return 1; }
   creating=1
   echo '{"noSource":true,"harness":"claude-code","env":["ENABLE_CLAUDEAI_MCP_SERVERS=false"]}' \
-    | timeout -k 30 900 discobox new --from-json > "$W/box.json" 2> "$W/box.err"; rc=$?
+    | timeout -k 30 900 discobox --auto-start-server=false new --from-json > "$W/box.json" 2> "$W/box.err"; rc=$?
   id=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$W/box.json" 2>/dev/null) || id=
   if [ "$rc" -ne 0 ] || [ -z "$id" ]; then
     # The server may have made the box before the create failed: remove whatever appeared (no job can create under the lock).
@@ -58,11 +58,11 @@ check(){ local v up= rc=1
     return 1
   fi
   creating=; flock -u 9; rc=1
-  for i in $(seq 1 120); do timeout 60 discobox shell "$id" -- true </dev/null >/dev/null 2>&1 && { up=1; break; }; sleep 5; done
+  for i in $(seq 1 120); do timeout 60 discobox --auto-start-server=false shell "$id" -- true </dev/null >/dev/null 2>&1 && { up=1; break; }; sleep 5; done
   if [ -z "$up" ]; then echo "box $id shell never came up"
   else
     # As jobs run it (bash -c, not a login shell); claude's stderr is merged in the box, and any line may carry the version.
-    v=$(timeout 120 discobox shell "$id" -- bash -c 'claude --version 2>&1' </dev/null 2>/dev/null)
+    v=$(timeout 120 discobox --auto-start-server=false shell "$id" -- bash -c 'claude --version 2>&1' </dev/null 2>/dev/null)
     if grep -qE '^[0-9]+\.[0-9]+\.[0-9]+ \(Claude Code\)' <<<"$v"; then echo "claude runs in a fresh box: $(grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+ \(Claude Code\)' <<<"$v")"; rc=0
     else echo "claude does not run in a fresh box: $(tr '\n' ' ' <<<"${v:-no output}")"; fi
   fi
@@ -76,7 +76,7 @@ check && exit 0
 flock -w 1800 9 || { echo "repair skipped: the box-cap lock was not free in 30 min"; exit 1; }
 n=$(live) || { echo "repair skipped: the box listing could not be read"; exit 1; }
 [ "$n" = 0 ] || { echo "repair skipped: $n other box(es) live on the pool (clear-cache would stop them); run again when idle"; exit 1; }
-timeout 900 discobox admin pool clear-cache "$POOL" >/dev/null 2>&1 || { echo "pool $POOL clear-cache failed"; exit 1; }
+timeout 900 discobox --auto-start-server=false admin pool clear-cache "$POOL" >/dev/null 2>&1 || { echo "pool $POOL clear-cache failed"; exit 1; }
 flock -u 9
 echo "cleared pool $POOL's cache; checking again"
 check && { echo "repaired"; exit 0; }

@@ -93,7 +93,7 @@ def main():
         print(__doc__.split('\n\n')[1], file=sys.stderr)
         return 2
     sec = sys.argv[1]
-    get = lambda *a: json.loads(subprocess.check_output(['discobox', *a, '-o', 'json']))
+    get = lambda *a: json.loads(subprocess.check_output(['discobox', '--auto-start-server=false', *a, '-o', 'json']))
     try:
         secret_routes = get('secret', 'get', sec).get('routes')
         bindings = get('admin', 'binding', 'ls')['secretBindings'] or []

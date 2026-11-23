@@ -46,12 +46,12 @@ collect(){ # $1 shard index, $2 box id: stop the unit (kills its cgroup), then p
   else log "-- shard $1: result archive refused or missing"; FAILS="$FAILS collect-$1"; fi
   rm -rf "$tmp"
 }
-audit(){ # $1 shard label, $2 box id, $3 cutoff (optional): any exchange after the cutoff fails the job
+audit_try(){ # $1 shard label, $2 box id, $3 cutoff (optional): any exchange after the cutoff fails the job
   # Discobox >= 0.19 (ADR 26-11-10-001): a box provisions itself at boot, so a deny-by-default shell box records its own
   # REFUSED provisioning fetches before the job starts. Before the cutoff every exchange must be blocked (else deny-by-default
   # failed); after it, any exchange at all fails, as before. No cutoff (a box never launched) = strict: any exchange fails.
   mkdir -p "$OUT/shard-$1"
-  python3 -I - "$2" "$OUT/shard-$1" "${3:-}" <<'PY' >> "$L" 2>&1 || FAILS="$FAILS audit-$1"
+  python3 -I - "$2" "$OUT/shard-$1" "${3:-}" <<'PY' 2>&1
 import json, os, subprocess, sys
 from datetime import datetime
 bid, d, cut = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -82,30 +82,39 @@ if post:
 print(f"-- audit {bid}: clean (0 exchanges after {cut or 'create'}; {len(pre)} provisioning exchanges: {sum(map(internal, pre))} from Discobox's own store, the rest refused)")
 PY
 }
+# An audit that could not be read or judged in full (the server down or restarting) is taken once more after the
+# server answers again. A real failure is never retried: it is logged and counted as it came (8f3bda5 review).
+audit(){ local o; o=$(audit_try "$@") && { echo "$o" >> "$L"; return 0; }; case "$o" in *": FAIL "*) echo "$o" >> "$L"; FAILS="$FAILS audit-$1"; return 1;; esac; server_wait || true; o=$(audit_try "$@") || FAILS="$FAILS audit-$1"; echo "$o" >> "$L"; }
 # `discobox rm` can return 0 and leave a box running in state "failed" (seen on 0.19.1 and 0.19.5, 11/17): a leaked VM that
 # also keeps the host from idling. Remove, then confirm from the listing; retry; a box never archived fails the job (leak).
 rm_box(){ local t st
-  for t in 1 2 3 4 5 6; do DB rm "$1" >/dev/null 2>&1
+  for t in 1 2 3 4 5 6; do [ "$t" -gt 1 ] && { server_wait || true; }; DB rm "$1" >/dev/null 2>&1
     sleep 5; st=$(DB ls -o json 2>/dev/null | python3 -I -c 'import json,sys; i=sys.argv[1]; d=json.load(sys.stdin); print(next(((b.get("runtime") or {}).get("state") for b in d["sandboxes"] or [] if b["id"]==i), "gone"))' "$1")
     case "$st" in archived|deleted|gone) [ "$t" -gt 1 ] && log "-- box $1 archived on try $t"; return 0;; esac
   done; log "-- box $1 NOT removed (state $st after 6 tries): LEAK"; FAILS="$FAILS leak-$1"; return 1; }
+# Cleanup must reach a server that answers real calls: if it died, discobox-ensure brings it back within about half a
+# minute (11/22 soak). A server that stayed gone for the whole wait is not waited for again in this cleanup.
+server_wait(){ [ -n "${SERVER_GONE:-}" ] && return 1; local end=$(( $(date +%s) + ${SERVER_WAIT_S:-180} )); while [ "$(date +%s)" -lt "$end" ]; do timeout 10 discobox --auto-start-server=false ls -o json 2>/dev/null | grep -q '"sandboxes"' && return 0; sleep 5; done; SERVER_GONE=1; log "-- the Discobox server did not answer for ${SERVER_WAIT_S:-180} s"; return 1; }
 finish(){ rc=$?; set +e; [ -n "$closed" ] && return; closed=1; trap - EXIT; trap '' INT TERM HUP; flock -u 9 2>/dev/null
   # A host shutdown: leave the job for job_sweep after boot (no == done, no audit or archive on a dying server).
   sysst=$(systemctl is-system-running 2>/dev/null); { [ -e /run/nologin ] || [[ $sysst =~ ^(stopping|offline)?$ ]]; } && { log "== $stage exit 98 (host shutting down: left for job_sweep after boot; ${why:-no reason yet})"; exit 98; }
   [ "$rc" -ne 0 ] && { log "== $stage exit $rc${why:+ ($why)}"; FAILS="$FAILS $stage"; }
   log "== cleanup $(date -u +%T)"
+  server_wait || { sysst=$(systemctl is-system-running 2>/dev/null); { [ -e /run/nologin ] || [[ $sysst =~ ^(stopping|offline)?$ ]]; } && { log "== $stage exit 98 (host shutting down during cleanup: left for job_sweep after boot)"; exit 98; }; }
   # Stop every shard first (kills its cgroup) so nothing runs between the audit and the archive.
   for id in "${ids[@]}"; do in_box "$id" systemctl stop fan-shard >/dev/null 2>&1; done
   for i in "${!ids[@]}"; do audit "$i" "${ids[$i]}" "${cuts[$i]:-}"; rm_box "${ids[$i]}"; done
   # A box created but never recorded (a failed --wait, a failed id parse) is found by name, audited and archived too.
   if [ -n "$RUN" ]; then
-    for id in $(DB ls -o json 2>/dev/null | python3 -I -c '
+    sweep_list(){ DB ls -o json 2>/dev/null | python3 -I -c '
 import json, sys
 pre = sys.argv[1]
 for b in json.load(sys.stdin)["sandboxes"] or []:
     name = b["displayName"] or ""   # v0.18.0 key: a missing key raises (the sweep fails loud below); a null name is ""
     if name.startswith(pre) and (b.get("runtime") or {}).get("state") not in ("archived", "deleted"):
-        print(b["id"])' "$JOB-$RUN-" || echo SWEEP_FAILED); do
+        print(b["id"])' "$JOB-$RUN-"; }
+    found=$(sweep_list) || { server_wait || true; found=$(sweep_list) || found="$found SWEEP_FAILED"; }
+    for id in $found; do
       if [ "$id" = SWEEP_FAILED ]; then log "-- sweep for unrecorded boxes FAILED (ls schema?)"; FAILS="$FAILS sweep"; continue; fi
       case " ${ids[*]} " in *" $id "*) continue;; esac
       log "-- unrecorded box $id found by name: stopping, auditing, archiving"; FAILS="$FAILS unrecorded-box"

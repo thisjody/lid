@@ -137,6 +137,13 @@ class FakeDB:
         self.audited.append(i)
         self.calls.append(('audit', i))
 
+    def stop_shard(self, i):
+        self.calls.append(('stop_shard', i))
+
+    def fan_audit(self, jobdir, i):
+        self.calls.append(('fan_audit', i))
+        return ''
+
 
 def test_sweep_closes_an_orphan_and_archives_its_boxes(tmp_path):
     scratch = tmp_path / 'scratch'
@@ -228,8 +235,8 @@ def test_the_agent_is_stopped_before_the_audit(tmp_path):
 
 def test_one_jobs_failure_does_not_stop_the_others(tmp_path):
     scratch = tmp_path / 'scratch'
-    a = mkjob(scratch, 'a', '== agent 01:01:00\n-- box sbx_a\n')
-    b = mkjob(scratch, 'b', '== agent 01:01:00\n-- box sbx_b\n')
+    a = mkjob(scratch, 'a', '== agent 01:01:00\n-- box sbx_a\n', audit=True)
+    b = mkjob(scratch, 'b', '== agent 01:01:00\n-- box sbx_b\n', audit=True)
     db = FakeDB({'sandboxes': [{'id': i, 'displayName': i, 'runtime': {'state': 'running'}, 'config': {}} for i in ('sbx_a', 'sbx_b')]},
                 fail_rm={'sbx_a'})
     out = js.sweep(str(scratch), [], NOW, db, sleep=lambda s: None, t='02:00:00')
@@ -266,3 +273,106 @@ def test_main_reports_what_it_did(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(js, 'Discobox', Boom)
     monkeypatch.setattr(js, 'processes', lambda proc='/proc': [])
     assert js.main() == 1 and 'stopped before closing anything: server down' in capsys.readouterr().out
+
+
+# -- fan jobs: the sweep audits their boxes too (whole-tree review 8, F1) --------------------------------------------
+
+class FanDB(FakeDB):
+    def __init__(self, listing, text='', **kw):
+        super().__init__(listing, **kw)
+        self.fan_audited, self.text = [], text
+
+    def fan_audit(self, jobdir, i):
+        self.fan_audited.append(i)
+        self.calls.append(('fan_audit', i))
+        return self.text
+
+
+def _fan_box(i, name):
+    return {'id': i, 'displayName': name, 'runtime': {'state': 'running'}, 'config': {}}
+
+
+def test_sweep_audits_an_orphaned_fan_job_before_archiving(tmp_path):
+    scratch = tmp_path / 'scratch'
+    d = mkjob(scratch, 'j2', '== boxes 01:00:00\n-- shard 0 box sbx_b\n', conf='SHARDS=1\n')
+    db = FanDB({'sandboxes': [_fan_box('sbx_b', 'j2-0-0')]}, text='VIOLATION 1 exchange(s) NOT refused: GET evil.example 200\n')
+    out = js.sweep(str(scratch), [], NOW, db, sleep=lambda s: None, t='02:00:00')
+    assert db.fan_audited == ['sbx_b'] and db.audited == []
+    assert db.calls.index(('stop_shard', 'sbx_b')) < db.calls.index(('fan_audit', 'sbx_b'))
+    assert db.removed and out['j2']['violations']
+    assert 'VIOLATION in the audit of sbx_b (job_sweep): 1 exchange(s) NOT refused' in (d / 'logs' / 'run.log').read_text()
+
+
+def test_sweep_fan_audit_failure_is_a_violation(tmp_path):
+    scratch = tmp_path / 'scratch'
+    d = mkjob(scratch, 'j2', '== boxes 01:00:00\n-- shard 0 box sbx_b\n', conf='SHARDS=1\n')
+
+    class Broken(FanDB):
+        def fan_audit(self, jobdir, i):
+            raise RuntimeError('audit failed')
+    db = Broken({'sandboxes': [_fan_box('sbx_b', 'j2-0-0')]})
+    js.sweep(str(scratch), [], NOW, db, sleep=lambda s: None, t='02:00:00')
+    assert db.removed and 'VIOLATION audit of sbx_b could not be read (job_sweep)' in (d / 'logs' / 'run.log').read_text()
+
+
+def test_late_archive_audits_a_fan_box(tmp_path):
+    scratch = tmp_path / 'scratch'
+    mkjob(scratch, 'j3', '== boxes 01:00:00\n-- shard 0 box sbx_c\n== done PASS\n', conf='SHARDS=1\n')
+    db = FanDB({'sandboxes': [_fan_box('sbx_c', 'j3-0-0')]})
+    js.sweep(str(scratch), [], NOW, db, sleep=lambda s: None, t='02:00:00')
+    assert db.fan_audited == ['sbx_c'] and db.removed
+
+
+def _ex(host, blocked):
+    return {'method': 'GET', 'host': host, 'status': 403 if blocked else 200, 'blocked': blocked, 'createdAt': '2026-11-21T00:00:00Z'}
+
+
+def test_fan_audit_lines():
+    clean = js.fan_audit_lines('sbx_a', {'exchanges': [_ex('pypi.org', True), _ex('assets.discobox.internal:443', False)]})
+    assert not any(l.startswith('VIOLATION') for l in clean.splitlines()) and 'clean' in clean
+    bad = js.fan_audit_lines('sbx_a', {'exchanges': [_ex('pypi.org', True), _ex('evil.example', False)]})
+    assert [l for l in bad.splitlines() if l.startswith('VIOLATION')] == \
+        ["VIOLATION 1 exchange(s) NOT refused (deny-by-default broken): ['GET evil.example 200']"]
+    for broken in ({}, {'exchanges': None}, {'exchanges': 'x'}, {'exchanges': [], 'unavailablePools': ['p']},
+                   {'exchanges': [_ex('pypi.org', True)] * js.AUDIT_LIMIT}, []):
+        assert js.fan_audit_lines('sbx_a', broken).startswith('VIOLATION audit of sbx_a INCOMPLETE')
+
+
+def test_discobox_fan_audit_runs_the_audit_and_records_it(tmp_path):
+    exe = tmp_path / 'discobox'
+    argv = tmp_path / 'argv'
+    exe.write_text('#!/bin/sh\necho "$@" >> ' + str(argv) + '\n'
+                   'echo \'{"exchanges": [{"method": "GET", "host": "evil.example", "status": 200, "blocked": false}]}\'\n')
+    exe.chmod(0o755)
+    (tmp_path / 'out').mkdir()
+    db = js.Discobox(str(exe))
+    db.stop_shard('sbx_a')
+    text = db.fan_audit(str(tmp_path), 'sbx_a')
+    assert text.startswith('VIOLATION 1 exchange(s) NOT refused')
+    assert argv.read_text().splitlines() == ['--auto-start-server=false shell sbx_a -- systemctl stop fan-shard',
+                                             f'--auto-start-server=false admin audit http --discobox sbx_a --limit {js.AUDIT_LIMIT} -o json']
+    assert (tmp_path / 'out' / 'audit.txt').read_text() == 'box sbx_a (audited by job_sweep)\n' + text
+
+
+def test_discobox_fan_audit_fails_on_a_failed_call(tmp_path):
+    exe = tmp_path / 'discobox'
+    exe.write_text('#!/bin/sh\nexit 3\n')
+    exe.chmod(0o755)
+    (tmp_path / 'out').mkdir()
+    with pytest.raises(RuntimeError):
+        js.Discobox(str(exe)).fan_audit(str(tmp_path), 'sbx_a')
+
+
+def test_a_box_of_unknown_job_type_is_never_archived_silently(tmp_path):
+    scratch = tmp_path / 'scratch'
+    d = mkjob(scratch, 'j4', '== agent 01:01:00\n-- box sbx_d\n', conf='REPO=x\n')
+    db = FanDB({'sandboxes': [{'id': 'sbx_d', 'displayName': 'x', 'runtime': {'state': 'running'},
+                                'config': {'source': {'localDirectory': str(d / 'src')}}}]})
+    js.sweep(str(scratch), [], NOW, db, sleep=lambda s: None, t='02:00:00')
+    assert db.removed and 'VIOLATION sbx_d not audited (job type unknown: no audit.py, no SHARDS=)' in (d / 'logs' / 'run.log').read_text()
+
+
+def test_only_an_explicit_true_counts_as_refused():
+    for odd in ('false', 1, 'yes', None):
+        e = dict(_ex('evil.example', False), blocked=odd)
+        assert js.fan_audit_lines('sbx_a', {'exchanges': [e]}).startswith('VIOLATION 1 exchange(s) NOT refused')

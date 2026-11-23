@@ -110,22 +110,22 @@ def fake_discobox(monkeypatch, secret, bindings, fail=False, project_wide=None):
 
     def co(args, **kw):
         # the real CLI shape, exactly: discobox <command...> -o json
-        assert args[0] == 'discobox' and args[-2:] == ['-o', 'json'], args
+        assert args[:2] == ['discobox', '--auto-start-server=false'] and args[-2:] == ['-o', 'json'], args
         if fail:
             raise _sp.CalledProcessError(1, args)
-        if args[1:3] == ['secret', 'get']:
-            assert args[3] == 's', args
-        if args[1:4] == ['admin', 'harnesses', 'get']:
-            assert args[4] == 'claude-code', args
-        if args[1:3] == ['secret', 'bound']:
-            assert args[3] == '--project-wide', args
-        if args[1:3] == ['secret', 'get']:
+        if args[2:4] == ['secret', 'get']:
+            assert args[4] == 's', args
+        if args[2:5] == ['admin', 'harnesses', 'get']:
+            assert args[5] == 'claude-code', args
+        if args[2:4] == ['secret', 'bound']:
+            assert args[4] == '--project-wide', args
+        if args[2:4] == ['secret', 'get']:
             return _json.dumps(secret).encode()
-        if args[1:4] == ['admin', 'binding', 'ls']:
+        if args[2:5] == ['admin', 'binding', 'ls']:
             return _json.dumps(bindings).encode()
-        if args[1:4] == ['admin', 'harnesses', 'get']:
+        if args[2:5] == ['admin', 'harnesses', 'get']:
             return _json.dumps({'id': 'h'}).encode()
-        if args[1:3] == ['secret', 'bound']:
+        if args[2:4] == ['secret', 'bound']:
             return _json.dumps({'boundSecrets': project_wide}).encode()
         raise AssertionError(args)
     monkeypatch.setattr(route_lock.subprocess, 'check_output', co)

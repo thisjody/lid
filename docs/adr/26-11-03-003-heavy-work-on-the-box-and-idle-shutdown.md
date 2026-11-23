@@ -11,7 +11,7 @@ On 11/3 the desk stopped the build box to save cost and ran five parallel code r
 ## Decision
 - **Heavy work goes to the box.** Builds, test suites, code generation, containers and database tests run on the build box through `scripts/lid_run.sh`, never on the laptop. The laptop only reads diffs and runs light, single-package checks.
 - **The box is off when not in use.** The operator stops it when its work finishes.
-- **Backstop.** Root cron runs `/usr/local/sbin/idle_shutdown.sh` every 5 minutes. After 4 consecutive idle checks (20 minutes) it powers the box off. Idle means:
+- **Backstop.** Root cron runs `/usr/local/sbin/idle_shutdown.sh` every 5 minutes. After 4 consecutive idle checks it powers the box off: 15 minutes after the first idle check, so 15 to 20 minutes after the box goes idle. Idle means:
   - no logged-in or ssh session;
   - no `job-agent` unit running;
   - 1-minute load under 0.5.

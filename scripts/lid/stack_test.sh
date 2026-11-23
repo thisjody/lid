@@ -37,8 +37,8 @@ GWP=$(get components.agentgateway.port); GWU=$(get components.agentgateway.user)
 GW=http://$IP:$GWP/mcp
 res(){ printf '%-4s (%s) %s\n' "$1" "$2" "$3"; [ "$1" != FAIL ] || fails=$((fails+1)); }
 rm_box(){ local t st
-  for t in 1 2 3 4 5 6; do timeout 600 discobox rm "$1" >/dev/null 2>&1
-    sleep 5; st=$(timeout 300 discobox ls -o json 2>/dev/null | python3 -I -c 'import json,sys; i=sys.argv[1]; d=json.load(sys.stdin); print(next(((b.get("runtime") or {}).get("state") for b in d["sandboxes"] or [] if b["id"]==i), "gone"))' "$1")
+  for t in 1 2 3 4 5 6; do timeout 600 discobox --auto-start-server=false rm "$1" >/dev/null 2>&1
+    sleep 5; st=$(timeout 300 discobox --auto-start-server=false ls -o json 2>/dev/null | python3 -I -c 'import json,sys; i=sys.argv[1]; d=json.load(sys.stdin); print(next(((b.get("runtime") or {}).get("state") for b in d["sandboxes"] or [] if b["id"]==i), "gone"))' "$1")
     case "$st" in archived|deleted|gone) [ "$t" -gt 1 ] && echo "-- box $1 archived on try $t"; return 0;; esac
   done; echo "-- box $1 NOT removed (state $st after 6 tries): LEAK"; return 1; }
 # The test box is removed (and confirmed) before the verdict, so a leak fails the run.
@@ -56,9 +56,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 trap '' PIPE
-inbox(){ discobox shell "$id" -- "$@"; }
+inbox(){ discobox --auto-start-server=false shell "$id" -- "$@"; }
 
-echo "stack_test $(date -u +%FT%TZ) on $(hostname): thv $(thv version | awk '/^ToolHive/{print $2}'), discobox $(discobox version | awk 'NR==1{print $NF}'), agentgateway $(/usr/local/bin/agentgateway -V 2>/dev/null)"
+echo "stack_test $(date -u +%FT%TZ) on $(hostname): thv $(thv version | awk '/^ToolHive/{print $2}'), discobox $(discobox --auto-start-server=false version | awk 'NR==1{print $NF}'), agentgateway $(/usr/local/bin/agentgateway -V 2>/dev/null)"
 # Same refusal as disco_job.sh's preflight: the lockdown must already be in place.
 rl=$(python3 "$L/route_lock.py" "$(get components.discobox.claude_secret)") || { echo "FAIL (pre) $rl"; exit 1; }   # ADR 26-11-10-001
 systemctl --user is-active -q thv-time.service || { echo "FAIL (pre) thv-time.service not active: run stack_up.sh"; exit 1; }
@@ -70,9 +70,9 @@ systemctl is-active -q "$AU" || { echo "FAIL (pre) $AU not active: run stack_up.
 mkdir -p "$HOME/scratch"; exec 9>>"$HOME/scratch/.box-cap.lock"; flock -w 1800 9 || { echo "FAIL (pre) the box-cap lock was not free in 30 min"; exit 1; }
 room=$(box_room) || { echo "FAIL (pre) $room"; exit 1; }
 before=$(box_ids) || { echo "FAIL (pre) the box listing could not be read"; exit 1; }; creating=1
-timeout -k 30 900 discobox admin box create --name "stack-test-$(date +%s)" --harness shell --egress-deny-by-default --no-project-skills --wait -o json > "$W/box.json" 2> "$W/box.err" || { echo "FAIL (pre) box create: $(tail -1 "$W/box.err")"; exit 1; }
+timeout -k 30 900 discobox --auto-start-server=false admin box create --name "stack-test-$(date +%s)" --harness shell --egress-deny-by-default --no-project-skills --wait -o json > "$W/box.json" 2> "$W/box.err" || { echo "FAIL (pre) box create: $(tail -1 "$W/box.err")"; exit 1; }
 id=$(python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['id'])" "$W/box.json"); creating=; flock -u 9
-discobox admin box update "$id" --egress-allow "$IP" > /dev/null
+discobox --auto-start-server=false admin box update "$id" --egress-allow "$IP" > /dev/null
 up=; for i in $(seq 1 40); do inbox true </dev/null >/dev/null 2>&1 && { up=1; break; }; sleep 5; done
 [ -n "$up" ] || { echo "FAIL (pre) sandbox $id shell never came up"; exit 1; }
 sleep 15   # the box-level allow converges within 15s (observed 2026-10-30)
@@ -136,7 +136,7 @@ else res SKIP d "thv-github.service not running: secret github-readonly not load
 
 # (e) Discobox's own audit of this sandbox
 sleep 3
-discobox admin audit http --discobox "$id" --limit 1000000 -o json > "$W/audit.json" 2>/dev/null || true
+discobox --auto-start-server=false admin audit http --discobox "$id" --limit 1000000 -o json > "$W/audit.json" 2>/dev/null || true
 erc=0; python3 -I - "$W/audit.json" "$IP" > "$W/e.txt" <<'PY' || erc=$?
 import collections, json, sys
 ex = json.load(open(sys.argv[1]))['exchanges']   # a missing key or a null fails (e)

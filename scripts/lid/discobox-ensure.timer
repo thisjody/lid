@@ -1,0 +1,10 @@
+[Unit]
+Description=Start the Discobox server at boot and within about half a minute of it dying
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=15s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

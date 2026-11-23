@@ -21,6 +21,7 @@ BROKEN = 'BROKEN'
 
 FAKE = r'''#!/bin/bash
 F=$FAKE_DIR
+[ "$1" = --auto-start-server=false ] && shift
 case "$1" in
   new) cat > /dev/null; n=$(( $(cat $F/n 2>/dev/null || echo 0) + 1 )); echo $n > $F/n; echo "sbx_c$n" >> $F/made
        if flock -n "$HOME/scratch/.box-cap.lock" true; then echo unlocked >> $F/newlock; else echo locked >> $F/newlock; fi
@@ -223,7 +224,7 @@ def test_job_probe_and_canary_agree_on_a_warning_before_the_version(tmp_path):
 @pytest.mark.parametrize('script', [('scripts', 'lid', 'stack_test.sh'), ('scripts', 'lid', 'decoy_proof.sh')])
 def test_other_box_creators_take_the_box_cap_lock(script):
     s = _src(*script)
-    m = re.search(r'^(?!\s*#).*\btimeout -k \d+ \d+ discobox (admin box create|new --from-json)', s, re.M)
+    m = re.search(r'^(?!\s*#).*\btimeout -k \d+ \d+ discobox --auto-start-server=false (admin box create|new --from-json)', s, re.M)
     assert m, 'the create is bounded by a timeout'
     create = m.start()
     lock = s.rfind('exec 9>>"$HOME/scratch/.box-cap.lock"; flock -w 1800 9', 0, create)
@@ -259,7 +260,7 @@ def test_new_boxes_lists_what_appeared_and_fails_on_an_unreadable_listing(tmp_pa
 @pytest.mark.parametrize('script', [('scripts', 'lid', 'stack_test.sh'), ('scripts', 'lid', 'decoy_proof.sh')])
 def test_a_create_cut_short_is_swept_in_cleanup(script):
     s = _src(*script)
-    create = re.search(r'timeout -k \d+ \d+ discobox (admin box create|new --from-json)', s).start()
+    create = re.search(r'timeout -k \d+ \d+ discobox --auto-start-server=false (admin box create|new --from-json)', s).start()
     pre = s[s.rfind('flock -w 1800 9', 0, create):create]
     assert 'before=$(box_ids)' in pre and 'creating=1' in pre, script
     assert 'new_boxes "$before"' in s[s.index('cleanup(){'):s.index('cleanup(){') + 3000] and 'possible leak' in s, script

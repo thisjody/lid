@@ -1,0 +1,11 @@
+[Unit]
+Description=Start the Discobox server when none runs (the only lid caller allowed to start one)
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash %h/stack/repo/scripts/lid/discobox_ensure.sh
+TimeoutStartSec=300
+# The client may start the server inside this unit; a oneshot's leftover processes are killed when it exits unless only
+# the main process is (11/22 soak: the server this unit started died with it 10 s later).
+KillMode=process

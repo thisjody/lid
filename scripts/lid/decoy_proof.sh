@@ -21,8 +21,8 @@ log(){ echo "$(date -u +%FT%TZ) $*" >> $L; echo "$*"; }
 RULE=(EPI_STACK_OUTPUT -d $IP/32 -p tcp -m owner --uid-owner $(id -u) -m tcp --dport $PORT -j RETURN)
 id=; sink=; stage=setup
 rm_box(){ local t st
-  for t in 1 2 3 4 5 6; do timeout 600 discobox rm "$1" >/dev/null 2>&1
-    sleep 5; st=$(timeout 300 discobox ls -o json 2>/dev/null | python3 -I -c 'import json,sys; i=sys.argv[1]; d=json.load(sys.stdin); print(next(((b.get("runtime") or {}).get("state") for b in d["sandboxes"] or [] if b["id"]==i), "gone"))' "$1")
+  for t in 1 2 3 4 5 6; do timeout 600 discobox --auto-start-server=false rm "$1" >/dev/null 2>&1
+    sleep 5; st=$(timeout 300 discobox --auto-start-server=false ls -o json 2>/dev/null | python3 -I -c 'import json,sys; i=sys.argv[1]; d=json.load(sys.stdin); print(next(((b.get("runtime") or {}).get("state") for b in d["sandboxes"] or [] if b["id"]==i), "gone"))' "$1")
     case "$st" in archived|deleted|gone) [ "$t" -gt 1 ] && echo "-- box $1 archived on try $t"; return 0;; esac
   done; echo "-- box $1 NOT removed (state $st after 6 tries): LEAK"; return 1; }
 cleanup(){ rc=$?; trap - EXIT INT TERM HUP; trap '' PIPE   # a closed pipe never cuts the cleanup short
@@ -34,7 +34,7 @@ cleanup(){ rc=$?; trap - EXIT INT TERM HUP; trap '' PIPE   # a closed pipe never
   if [ -z "$id" ] && [ -n "${creating:-}" ]; then
     if made=$(new_boxes "$before"); then for b in $made; do rm_box "$b" > "$W/out/rm.txt" 2>&1 || { [ $rc -ne 0 ] || rc=6; why="test box $b leaked"; }; while read -r l; do log "$l"; done < "$W/out/rm.txt"; done
     else log "-- the listing could not be read after the create: possible leak"; [ $rc -ne 0 ] || rc=6; fi; fi
-  [ -n "$id" ] && { timeout 600 discobox admin audit http --discobox "$id" --limit 100000 -o json > $W/out/audit.json 2>/dev/null; rm_box "$id" > "$W/out/rm.txt" 2>&1 || { [ $rc -ne 0 ] || rc=6; why="test box $id leaked"; }; while read -r l; do log "$l"; done < "$W/out/rm.txt"; }
+  [ -n "$id" ] && { timeout 600 discobox --auto-start-server=false admin audit http --discobox "$id" --limit 100000 -o json > $W/out/audit.json 2>/dev/null; rm_box "$id" > "$W/out/rm.txt" 2>&1 || { [ $rc -ne 0 ] || rc=6; why="test box $id leaked"; }; while read -r l; do log "$l"; done < "$W/out/rm.txt"; }
   if [ $rc -eq 0 ]; then log "== $stage exit 0"; log "== done"; else log "== $stage exit $rc (${why:-unexpected})"; log "== done FAILED at $stage"; fi; exit $rc; }
 trap cleanup EXIT; trap 'why=signal; exit 130' INT TERM HUP PIPE
 die(){ why=$2; exit $1; }
@@ -73,15 +73,15 @@ stage=box; log "== box"
 mkdir -p "$HOME/scratch"; exec 9>>"$HOME/scratch/.box-cap.lock"; flock -w 1800 9 || die 3 "the box-cap lock was not free in 30 min"
 room=$(box_room) || die 3 "$room"
 before=$(box_ids) || die 3 "the box listing could not be read"; creating=1
-echo '{"noSource":true,"harness":"claude-code","env":["ENABLE_CLAUDEAI_MCP_SERVERS=false"]}' | timeout -k 30 900 discobox new --from-json > $W/out/box.json 2> $W/out/box.err || die 3 "new failed: $(tail -1 $W/out/box.err)"
+echo '{"noSource":true,"harness":"claude-code","env":["ENABLE_CLAUDEAI_MCP_SERVERS=false"]}' | timeout -k 30 900 discobox --auto-start-server=false new --from-json > $W/out/box.json 2> $W/out/box.err || die 3 "new failed: $(tail -1 $W/out/box.err)"
 id=$(python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['id'])" $W/out/box.json) || die 3 "no id"; creating=; flock -u 9; log "-- box $id"
-for i in $(seq 1 60); do discobox shell "$id" -- true </dev/null >/dev/null 2>&1 && break; sleep 10; done
-discobox shell "$id" -- true </dev/null >/dev/null 2>&1 || die 3 "box never answered"
-discobox admin box update "$id" --egress-allow "$IP" >/dev/null || die 3 "egress allow failed"; sleep 20
+for i in $(seq 1 60); do discobox --auto-start-server=false shell "$id" -- true </dev/null >/dev/null 2>&1 && break; sleep 10; done
+discobox --auto-start-server=false shell "$id" -- true </dev/null >/dev/null 2>&1 || die 3 "box never answered"
+discobox --auto-start-server=false admin box update "$id" --egress-allow "$IP" >/dev/null || die 3 "egress allow failed"; sleep 20
 log "== box exit 0"
 
 stage=probe; log "== probe"
-discobox shell "$id" -- bash -c '
+discobox --auto-start-server=false shell "$id" -- bash -c '
 IP='"$IP"'; P='"$PORT"'
 S=$(jq -r .claudeAiOauth.accessToken ~/.claude/.credentials.json 2>/dev/null)
 [ -n "$S" ] && [ "$S" != null ] || { echo "NO_SENTINEL"; exit 1; }
@@ -103,7 +103,7 @@ sleep 5
 log "== probe exit 0"
 
 stage=judge; log "== judge"
-discobox admin audit http --discobox "$id" --limit 100000 -o json > $W/out/audit.json 2>$W/out/audit.err || die 5 "audit could not be read: $(tail -1 $W/out/audit.err)"
+discobox --auto-start-server=false admin audit http --discobox "$id" --limit 100000 -o json > $W/out/audit.json 2>$W/out/audit.err || die 5 "audit could not be read: $(tail -1 $W/out/audit.err)"
 python3 -I - $W/out <<'PY' > $W/out/RESULT.txt 2>&1; r=$?
 import json, sys
 o = sys.argv[1]

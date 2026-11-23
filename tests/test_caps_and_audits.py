@@ -56,7 +56,7 @@ def test_every_audit_treats_a_full_page_as_truncated():
     a = a[:a.index('\nPY\n')]
     assert re.search(r"len\(ex\) >= LIMIT", a) and 'VIOLATION audit truncated' in a and "str(LIMIT)" in a
     w = _src('scripts', 'monitor', 'disco_fan_lib', 'worker.sh')
-    au = w[w.index('audit(){'):]
+    au = w[w.index('audit_try(){'):]
     assert re.search(r"len\(ex\) >= LIMIT", au) and 'truncated' in au and 'str(LIMIT)' in au
     d = _src('scripts', 'lid', 'decoy_proof.sh')
     assert re.search(r'len\(ex\) >= (\d+)', d) and 'truncated' in d
@@ -75,7 +75,7 @@ def test_decoy_metadata_probes_keep_no_body():
 def test_disco_job_bounded_calls_carry_a_kill_timeout():
     job = _src('scripts', 'monitor', 'disco_job.sh')
     assert re.search(r'^dbx\(\)\{ timeout -k \d+ \d+ discobox', job, re.M)
-    assert re.search(r'timeout -k \d+ 900 discobox new --from-json', job)
+    assert re.search(r'timeout -k \d+ 900 discobox --auto-start-server=false new --from-json', job)
 
 
 
@@ -145,7 +145,7 @@ def test_decoy_probes_never_read_a_stale_body():
 
 def test_quick_calls_carry_a_kill_timeout():
     job = _src('scripts', 'monitor', 'disco_job.sh')
-    assert re.search(r'^quick\(\)\{ timeout -k \d+ \d+ discobox shell', job, re.M)
+    assert re.search(r'^quick\(\)\{ timeout -k \d+ \d+ discobox --auto-start-server=false shell', job, re.M)
 
 
 def test_the_refusal_message_names_the_size_once(tmp_path):
@@ -153,3 +153,24 @@ def test_the_refusal_message_names_the_size_once(tmp_path):
     assert log.count(str(10 << 30)) == 1, log
     out, calls, log = _collect(tmp_path / 'u' if (tmp_path / 'u').mkdir() is None else None, 'abc')
     assert 'size unreadable' in log and 'abc' not in log, log
+
+
+# -- whole-tree review 8, F2/F3: every other copy of box-controlled text onto the host is capped ----------------------
+
+def test_capped_keeps_at_most_err_cap_and_never_breaks_the_writer(tmp_path):
+    j = _src('scripts', 'monitor', 'disco_job.sh')
+    fn = re.search(r'^capped\(\)\{.*\}$', j, re.M).group(0)
+    cap = re.search(r'^ERR_CAP=.*$', j, re.M).group(0)
+    f = tmp_path / 'err'
+    r = subprocess.run(['bash', '-c', f'{cap}\n{fn}\nhead -c 3000000 /dev/zero | capped {f}; echo "rc=${{PIPESTATUS[0]}}"'],
+                       capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == 'rc=0', r.stdout + r.stderr   # the writer read to its end: no SIGPIPE
+    assert f.stat().st_size == 65536
+
+
+def test_box_text_copies_use_the_caps():
+    j = _src('scripts', 'monitor', 'disco_job.sh')
+    assert re.search(r'quick tail -c \d+ /tmp/job/agent\.err .*\| capped "\$OUT/agent_err_tail\.txt"', j)
+    assert '2> >(capped "$W/export.err")' in j and '2>"$W/export.err"' not in j
+    poll = re.search(r'^  st=\$\(quick bash -c .*$', j, re.M).group(0)
+    assert poll.rstrip().endswith('| head -c 64)')

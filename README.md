@@ -74,8 +74,8 @@ commit differs from them only in comments, docs and test selection.
 - On the default pool (6 vCPU, 20 GiB, an n1-standard-8 host) at most **8 sandboxes run at once**: the 9th dies before
   it is healthy. The manifest records this as `pool.max_boxes`, and everything that creates a sandbox counts against it
   under one lock.
-- **Agent jobs:** up to 6 in parallel; a 7th is refused before it starts. A backlog of 12 drains 6 at a time with no
-  failure.
+- **Agent jobs:** up to 6 in parallel; a 7th is refused before it starts. lid does not queue jobs: a 7th
+  concurrent job exits 5 before its box is made. A backlog of 12, fed 6 at a time by the caller, drains with no failure.
 - **Command jobs:** up to 8 shards (the sandbox ceiling), and `shards x workers` up to 2 x the pool's vCPUs.
 - Creating a sandbox took p50 12 s and p99 26 s with 6 at once (24 s and 41 s in an earlier run); host memory peaked at
   7.4 to 11.2 of 30 GB.
@@ -110,7 +110,7 @@ versions pinned in `stack/stack.yaml`. Other clouds or credential schemes would 
   - `stack_test.sh`, `decoy_proof.sh`, `route_lock.py`: the checks above;
   - `stack_check.sh` compares the pins with upstream releases and advisories, and the box with the manifest;
   - `stack_secret.sh` loads the GitHub token into ToolHive's encrypted store from stdin;
-  - `idle_shutdown.sh` powers the box off after 20 minutes idle.
+  - `idle_shutdown.sh` powers the box off after 15 to 20 minutes idle.
 - `scripts/monitor/`: the two job drivers above.
 - `scripts/lid_run.sh`: the only path from your machine (called "the desk" in the scripts) to the box, over IAP ssh. It
   checks the remote hostname before running anything.

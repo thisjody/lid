@@ -68,29 +68,38 @@ MAXBOX=6; id=; stage=preflight; closed=
 log(){ echo "$*" >> "$L"; }
 stage(){ log "== $1 exit 0"; stage=$2; log "== $2 $(date -u +%T)"; }
 # Every Discobox call is bounded (a hung shell or ls never holds the job, its cleanup, or the idle check forever).
-dbx(){ timeout -k 30 3600 discobox "$@"; }
+dbx(){ timeout -k 30 3600 discobox --auto-start-server=false "$@"; }
 inbox(){ dbx shell "$id" -- "$@"; }
-quick(){ timeout -k 10 60 discobox shell "$id" -- "$@"; }
+quick(){ timeout -k 10 60 discobox --auto-start-server=false shell "$id" -- "$@"; }
 # The most this job takes back from its box in any one file (agent output is untrusted).
 CAP=$((512 << 20))
 # take FILE CMD...: CMD's stdout into FILE, capped at CAP; returns CMD's own status (not head's) and logs a truncation.
 take(){ local f=$1; shift; "$@" | head -c "$CAP" > "$f"; local r=("${PIPESTATUS[@]}")
   [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -ge "$CAP" ] && log "-- $(basename "$f") hit the ${CAP}-byte cap: truncated"
   return "${r[0]}"; }
+# Box-controlled text the job keeps for diagnosis (the agent's stderr tail, the export's stderr) is far smaller.
+ERR_CAP=65536
+# capped FILE: stdin into FILE, at most ERR_CAP bytes; the rest is read and dropped, so the writer never dies on a closed pipe.
+capped(){ head -c "$ERR_CAP" > "$1"; cat > /dev/null; }
 # discobox rm can return 0 and leave a box running (0.19.1 and 0.19.5, 11/17): confirm from the listing, retry, else LEAK.
 rm_box(){ local t st
-  for t in 1 2 3 4 5 6; do dbx rm "$1" >/dev/null 2>&1
-    sleep 5; st=$(timeout 300 discobox ls -o json 2>/dev/null | python3 -I -c 'import json,sys; i=sys.argv[1]; d=json.load(sys.stdin); print(next(((b.get("runtime") or {}).get("state") for b in d["sandboxes"] or [] if b["id"]==i), "gone"))' "$1")
+  for t in 1 2 3 4 5 6; do [ "$t" -gt 1 ] && { server_wait || true; }; dbx rm "$1" >/dev/null 2>&1
+    sleep 5; st=$(timeout 300 discobox --auto-start-server=false ls -o json 2>/dev/null | python3 -I -c 'import json,sys; i=sys.argv[1]; d=json.load(sys.stdin); print(next(((b.get("runtime") or {}).get("state") for b in d["sandboxes"] or [] if b["id"]==i), "gone"))' "$1")
     case "$st" in archived|deleted|gone) [ "$t" -gt 1 ] && log "-- box $1 archived on try $t"; return 0;; esac
   done; log "-- box $1 NOT removed (state $st after 6 tries): LEAK"; return 1; }
+# Cleanup must reach a server that answers real calls: if it died, discobox-ensure brings it back within about half a
+# minute (11/22 soak). A server that stayed gone for the whole wait is not waited for again in this cleanup.
+server_wait(){ [ -n "${SERVER_GONE:-}" ] && return 1; local end=$(( $(date +%s) + ${SERVER_WAIT_S:-180} )); while [ "$(date +%s)" -lt "$end" ]; do timeout 10 discobox --auto-start-server=false ls -o json 2>/dev/null | grep -q '"sandboxes"' && return 0; sleep 5; done; SERVER_GONE=1; log "-- the Discobox server did not answer for ${SERVER_WAIT_S:-180} s"; return 1; }
 finish(){ rc=$?; [ -n "$closed" ] && return; closed=1; trap - EXIT; trap '' INT TERM HUP; flock -u 9 2>/dev/null || true
   # The box-cap lock (fd 9) is released first, so a slow cleanup never blocks other jobs' creates.
   # A host shutdown (or systemctl unable to answer: D-Bus already gone): the server is going away, so an audit or archive now would only write VIOLATION/LEAK. No == done:
   # job_sweep closes the job after boot (worker gone), audits and archives its box.
   sysst=$(systemctl is-system-running 2>/dev/null); { [ -e /run/nologin ] || [[ $sysst =~ ^(stopping|offline)?$ ]]; } && { log "== $stage exit 98 (host shutting down: left for job_sweep after boot; ${why:-no reason yet})"; exit 98; }
+  # Everything below needs the server, the lookup of a half-made box included; a shutdown that began meanwhile is left to job_sweep.
+  server_wait || { sysst=$(systemctl is-system-running 2>/dev/null); { [ -e /run/nologin ] || [[ $sysst =~ ^(stopping|offline)?$ ]]; } && { log "== $stage exit 98 (host shutting down during cleanup: left for job_sweep after boot)"; exit 98; }; }
   # A create that failed after the server made the box leaves no id: find it by its source path, this job's own $W/src (sweep).
   if [ -z "$id" ]; then
-    id=$(timeout 300 discobox ls -o json 2>/dev/null | python3 -I -c 'import json,sys; w=sys.argv[1]; print(next((b["id"] for b in json.load(sys.stdin)["sandboxes"] or [] if ((b.get("config") or {}).get("source") or {}).get("localDirectory")==w and (b.get("runtime") or {}).get("state") not in ("archived","deleted")), ""))' "$W/src" 2>/dev/null)
+    id=$(timeout 300 discobox --auto-start-server=false ls -o json 2>/dev/null | python3 -I -c 'import json,sys; w=sys.argv[1]; print(next((b["id"] for b in json.load(sys.stdin)["sandboxes"] or [] if ((b.get("config") or {}).get("source") or {}).get("localDirectory")==w and (b.get("runtime") or {}).get("state") not in ("archived","deleted")), ""))' "$W/src" 2>/dev/null)
     [ $? -eq 0 ] || log "-- sweep FAILED: the box listing could not be read (an orphaned box may remain)"
     [ -n "$id" ] && log "-- sweep: box $id found by its source path, auditing and removing it"
   fi
@@ -104,8 +113,10 @@ finish(){ rc=$?; [ -n "$closed" ] && return; closed=1; trap - EXIT; trap '' INT 
     # An audit that cannot be read is a violation, not a pass: the connector check never ran (Discobox 0.19 renamed
     # --discobox-id to --discobox and dbx19-dry3 "passed" with no audit at all, 11/10).
     # The agent stops first, so nothing it sends after the audit snapshot goes unrecorded.
-    timeout 60 discobox shell "$id" -- sudo -n systemctl stop job-agent </dev/null >/dev/null 2>&1 || true
-    { echo "box $id"; python3 "$J/audit.py" "$id" "$OUT" 2>&1 || echo "VIOLATION audit could not be read"; } > "$OUT/audit.txt" || true
+    timeout 60 discobox --auto-start-server=false shell "$id" -- sudo -n systemctl stop job-agent </dev/null >/dev/null 2>&1 || true
+    # An audit taken while the server was down or restarting is taken once more after it answers again (11/22 soak).
+    o=$( { echo "box $id"; python3 "$J/audit.py" "$id" "$OUT" 2>&1; } ) || { server_wait || true; o=$( { echo "box $id"; python3 "$J/audit.py" "$id" "$OUT" 2>&1; } ) || o="$o"$'\n'"VIOLATION audit could not be read"; }
+    printf '%s\n' "$o" > "$OUT/audit.txt" || true
     grep -q '^VIOLATION' "$OUT/audit.txt" && { log "-- lockdown violation, see out/audit.txt"; [ "$rc" -ne 0 ] || rc=3; }
     rm_box "$id" || { [ "$rc" -ne 0 ] || rc=3; }
   fi
@@ -152,7 +163,7 @@ def dead(b):
 print(sum(1 for b in json.load(sys.stdin)["sandboxes"] or [] if not dead(b)))') \
   || die 5 "the box listing could not be read for the cap"
 [ "$live" -ge "$MAXBOX" ] && die 5 "$MAXBOX boxes already live"
-timeout -k 30 900 discobox new --from-json < "$W/req.json" > "$W/box.json" 2> "$W/box.err" || die 7 "discobox new failed"
+timeout -k 30 900 discobox --auto-start-server=false new --from-json < "$W/req.json" > "$W/box.json" 2> "$W/box.err" || die 7 "discobox new failed"
 flock -u 9
 id=$(python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['id'])" "$W/box.json") || die 7 "no box id"; log "-- box $id"
 [ -z "$ALLOW" ] || dbx admin box update "$id" --egress-allow "$ALLOW" >/dev/null || die 7 "box egress update failed"
@@ -221,11 +232,11 @@ end=$(( $(date +%s) + TMIN*60 )); beat=$(date +%s); first_miss=; gone=0
 # 5-minute clock, never read as "no DONE"; "gone" (the agent unit inactive with no DONE or agent.exit) must hold two polls.
 while :; do
   now=$(date +%s)
-  st=$(quick bash -c 'if [ -f /tmp/job/DONE ]; then echo done; elif [ -f /tmp/job/agent.exit ]; then echo exit; elif systemctl is-active -q job-agent; then echo running; else echo gone; fi' </dev/null 2>/dev/null)
+  st=$(quick bash -c 'if [ -f /tmp/job/DONE ]; then echo done; elif [ -f /tmp/job/agent.exit ]; then echo exit; elif systemctl is-active -q job-agent; then echo running; else echo gone; fi' </dev/null 2>/dev/null | head -c 64)
   case "$st" in
     done) break;;
     exit) quick test -f /tmp/job/DONE </dev/null && break
-      quick tail -5 /tmp/job/agent.err > "$OUT/agent_err_tail.txt" </dev/null 2>&1 || true; die 10 "agent ended without DONE";;
+      quick tail -c 4096 /tmp/job/agent.err </dev/null 2>&1 | capped "$OUT/agent_err_tail.txt" || true; die 10 "agent ended without DONE";;
     running) first_miss=; gone=0;;
     gone) first_miss=; gone=$((gone + 1)); [ "$gone" -ge 2 ] && die 8 "agent unit gone without DONE (the box restarted under it?)";;
     *) first_miss=${first_miss:-$now}; [ $((now - first_miss)) -ge 300 ] && die 8 "box unreachable for 5 min";;
@@ -238,7 +249,7 @@ done
 stage agent export
 take "$OUT/agent.jsonl" inbox cat /tmp/job/agent.jsonl </dev/null 2>/dev/null || log "-- no agent.jsonl"
 take "$OUT/REPORT.md" inbox cat /tmp/job/REPORT.md </dev/null 2>/dev/null || log "-- no REPORT.md"
-take "$OUT/patches.tgz" inbox bash -s "$W/src" "$base" 2>"$W/export.err" <<'EXP' || die 11 "export failed"
+take "$OUT/patches.tgz" inbox bash -s "$W/src" "$base" 2> >(capped "$W/export.err") <<'EXP' || die 11 "export failed"
 cd "$1" || exit 1; p=/tmp/job/patches; mkdir -p $p
 git status --short > /tmp/job/worktree_status.txt
 for b in $(git for-each-ref --format='%(refname:short)' refs/heads) HEAD; do
@@ -258,7 +269,7 @@ import json, os, subprocess, sys
 # The lock is the Claude credential's route (route_lock.py). Harness egress is Discobox's own default and is only reported.
 rc = subprocess.call([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'route_lock.py'), sys.argv[1]])
 if rc: sys.exit('lockdown not in place')
-eg = json.loads(subprocess.check_output(['discobox', 'admin', 'harnesses', 'get', 'claude-code', '-o', 'json'])).get('egress') or {}
+eg = json.loads(subprocess.check_output(['discobox', '--auto-start-server=false', 'admin', 'harnesses', 'get', 'claude-code', '-o', 'json'])).get('egress') or {}
 print('harness egress', json.dumps(eg))
 PY
 cat > "$T/req.py" <<'PY'
@@ -274,7 +285,7 @@ cat > "$T/audit.py" <<'PY'
 import collections, json, subprocess, sys
 box, out = sys.argv[1:3]
 LIMIT = 1000000
-raw = subprocess.check_output(['discobox', 'admin', 'audit', 'http', '--discobox', box, '--limit', str(LIMIT), '-o', 'json'], timeout=600)  # default limit is 1000
+raw = subprocess.check_output(['discobox', '--auto-start-server=false', 'admin', 'audit', 'http', '--discobox', box, '--limit', str(LIMIT), '-o', 'json'], timeout=600)  # default limit is 1000
 open(out + '/audit.json', 'wb').write(raw)
 ex = json.loads(raw)['exchanges']   # a missing key raises, and a null is refused: the job reads VIOLATION, never 'clean'
 if ex is None:

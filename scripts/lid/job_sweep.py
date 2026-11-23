@@ -3,8 +3,9 @@
 A job is ~/scratch/<job>/ with job/worker.sh and logs/run.log (disco_job.sh and disco_fan.sh both lay it out so). It is an
 orphan when its log has no `== done` line, no running process has its job/worker.sh on the command line, and the log has
 not been written for MIN_AGE_S (a job just launched may not have its worker yet). For each orphan this:
-  - stops the box's agent, then audits each live box when the job shipped an audit.py (Claude jobs), into out/audit.txt;
-    an audit that cannot be read is logged as a VIOLATION (as the worker itself does);
+  - stops what runs in each live box, then audits it into out/audit.txt: with the job's own audit.py (Claude jobs), or for a
+    fan job by requiring every exchange to have been refused (fan_audit_lines); an audit that cannot be read, or that
+    cannot be judged in full, is logged as a VIOLATION (as the worker itself does), as is a box of a job of neither kind;
   - archives each live box and confirms it (RM_TRIES tries); a box that will not archive is logged as LEAK;
   - closes the log: `== <stage> exit 99 (worker gone ...)`, then `== done FAILED at <stage> (worker gone) HH:MM:SS`
     (Claude jobs) or `== done FAIL (worker gone)` (fan jobs), the forms boxwatch and the soak read.
@@ -104,6 +105,53 @@ def _violations(i, text):
             for l in (text or '').splitlines() if l.startswith('VIOLATION')]
 
 
+AUDIT_LIMIT = 1000000
+INTERNAL = '.discobox.internal'
+
+
+def fan_audit_lines(i, a):
+    """A fan box's audit, judged without the worker's cutoff (the worker died before it could judge): every exchange must
+    have been refused, except Discobox's own pool services, so a box whose deny-by-default failed is a VIOLATION. A
+    listing that cannot be judged in full is a VIOLATION too, never a clean audit."""
+    ex = a.get('exchanges') if isinstance(a, dict) else None
+    if not isinstance(ex, list):
+        return f'VIOLATION audit of {i} INCOMPLETE (no exchanges list)\n'
+    if len(ex) >= AUDIT_LIMIT:
+        return f'VIOLATION audit of {i} INCOMPLETE (truncated at {AUDIT_LIMIT} exchanges)\n'
+    if a.get('unavailablePools'):
+        return f"VIOLATION audit of {i} INCOMPLETE (unavailable pools {a['unavailablePools']})\n"
+    open_ = [e for e in ex if not (isinstance(e, dict) and e.get('blocked') is True)
+             and not (isinstance(e, dict) and str(e.get('host', '')).split(':')[0].endswith(INTERNAL))]
+    if open_:
+        seen = [' '.join(str(e.get(k)) if isinstance(e, dict) else repr(e) for k in ('method', 'host', 'status'))
+                for e in open_[:5]]
+        return f'VIOLATION {len(open_)} exchange(s) NOT refused (deny-by-default broken): {seen}\n'
+    return f'-- audit {i}: clean ({len(ex)} exchanges, every one refused or Discobox-internal; judged by job_sweep)\n'
+
+
+def _audit_box(jobdir, i, db):
+    """Stop what runs in the box, then audit it: a Claude job with its own audit.py, a fan job (job.conf SHARDS=) with
+    fan_audit. Returns the VIOLATION notes for the job's log; an audit that cannot be read is one."""
+    claude = os.path.isfile(os.path.join(jobdir, 'job', 'audit.py'))
+    if not (claude or _is_fan(jobdir)):
+        return [f'VIOLATION {i} not audited (job type unknown: no audit.py, no SHARDS=)']
+    try:
+        (db.stop_agent if claude else db.stop_shard)(i)
+    except Exception:
+        pass
+    try:
+        return _violations(i, (db.audit if claude else db.fan_audit)(jobdir, i))
+    except Exception:
+        return [f'VIOLATION audit of {i} could not be read (job_sweep)']
+
+
+def _is_fan(jobdir):
+    try:
+        return 'SHARDS=' in open(os.path.join(jobdir, 'job', 'job.conf'), errors='replace').read()
+    except OSError:
+        return False
+
+
 def _listing(db):
     d = db.ls()
     if not (isinstance(d, dict) and 'sandboxes' in d and isinstance(d['sandboxes'], (list, type(None)))):
@@ -131,15 +179,7 @@ def _close(scratch, job, listing, db, sleep, t):
     boxes, leaked, notes, error, handled = boxes_of(job, jobdir, log, listing), [], [], None, []
     try:
         for i in boxes:
-            if os.path.isfile(os.path.join(jobdir, 'job', 'audit.py')):
-                try:
-                    db.stop_agent(i)
-                except Exception:
-                    pass
-                try:
-                    notes += _violations(i, db.audit(jobdir, i))
-                except Exception:
-                    notes.append(f'VIOLATION audit of {i} could not be read (job_sweep)')
+            notes += _audit_box(jobdir, i, db)
             for _ in range(RM_TRIES):
                 db.rm(i)
                 sleep(5)
@@ -202,15 +242,7 @@ def _archive_late(scratch, job, boxes, db, sleep):
     leaked, notes, error, handled = [], [], None, []
     try:
         for i in boxes:
-            if os.path.isfile(os.path.join(jobdir, 'job', 'audit.py')):
-                try:
-                    db.stop_agent(i)
-                except Exception:
-                    pass
-                try:
-                    notes += _violations(i, db.audit(jobdir, i))
-                except Exception:
-                    notes.append(f'VIOLATION audit of {i} could not be read (job_sweep)')
+            notes += _audit_box(jobdir, i, db)
             for _ in range(RM_TRIES):
                 db.rm(i)
                 sleep(5)
@@ -260,7 +292,7 @@ class Discobox:
         self.exe = exe
 
     def _run(self, args, timeout):
-        return subprocess.run([self.exe, *args], capture_output=True, text=True, timeout=timeout)
+        return subprocess.run([self.exe, '--auto-start-server=false', *args], capture_output=True, text=True, timeout=timeout)
 
     def ls(self):
         r = self._run(['ls', '-o', 'json'], 300)
@@ -273,6 +305,18 @@ class Discobox:
 
     def stop_agent(self, i):
         self._run(['shell', i, '--', 'sudo', '-n', 'systemctl', 'stop', 'job-agent'], 60)
+
+    def stop_shard(self, i):
+        self._run(['shell', i, '--', 'systemctl', 'stop', 'fan-shard'], 60)
+
+    def fan_audit(self, jobdir, i):
+        r = self._run(['admin', 'audit', 'http', '--discobox', i, '--limit', str(AUDIT_LIMIT), '-o', 'json'], 600)
+        if r.returncode != 0:
+            raise RuntimeError('discobox audit failed')
+        text = fan_audit_lines(i, json.loads(r.stdout))
+        with open(os.path.join(jobdir, 'out', 'audit.txt'), 'a') as f:
+            f.write(f'box {i} (audited by job_sweep)\n' + text)
+        return text
 
     def audit(self, jobdir, i):
         r = subprocess.run([sys.executable, '-I', os.path.join(jobdir, 'job', 'audit.py'), i, os.path.join(jobdir, 'out')],

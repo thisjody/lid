@@ -653,8 +653,8 @@ def test_box_cap_is_atomic():
     pre = _between(s, 'log "== $stage $(date -u +%T)"', 'stage preflight clone')
     assert 'boxes already live' not in pre, 'the cap check moved out of preflight'
     box = _between(s, 'stage clone box', 'stage box setup')
-    assert 'flock' in box and box.index('flock') < box.index('boxes already live') < box.index('discobox new --from-json')
-    assert 'flock -u 9' in box and box.index('discobox new --from-json') < box.index('flock -u 9')
+    assert 'flock' in box and box.index('flock') < box.index('boxes already live') < box.index('discobox --auto-start-server=false new --from-json')
+    assert 'flock -u 9' in box and box.index('discobox --auto-start-server=false new --from-json') < box.index('flock -u 9')
     assert re.search(r"[\"']archived[\"'], [\"']deleted[\"']", box) and 'awk' not in box   # the idle predicate
 
 
@@ -685,7 +685,7 @@ def test_cap_lock_released_in_cleanup_and_create_bounded():
     fin = s[s.index('finish(){ rc=$?;'):]
     assert 'flock -u 9' in fin.split('\n')[0] + fin.split('\n')[1] + fin.split('\n')[2], 'released at the top of finish'
     box = _between(s, 'stage clone box', 'stage box setup')
-    assert re.search(r'timeout (?:-k \d+ )?(\d+) discobox new', box) and int(re.search(r'timeout (?:-k \d+ )?(\d+) discobox new', box).group(1)) < 1800
+    assert re.search(r'timeout (?:-k \d+ )?(\d+) discobox --auto-start-server=false new', box) and int(re.search(r'timeout (?:-k \d+ )?(\d+) discobox --auto-start-server=false new', box).group(1)) < 1800
 
 
 # every box call in the agent poll loop is bounded, none auto-starts the server, and the job fails when the box
@@ -762,12 +762,14 @@ def test_poll_loop_behaviour(tmp_path, tokens, recheck, expect):
     assert _run_poll(tmp_path, tokens, recheck) == expect
 
 
-def test_poll_loop_one_state_call_per_poll_and_server_may_start():
+def test_poll_loop_one_state_call_per_poll_and_never_starts_a_server():
+    # 11/21: a poll allowed to start a server replaced a busy one and killed every live agent; discobox-ensure.timer now
+    # brings a dead server back, so the poll never starts one.
     s = _src('scripts', 'monitor', 'disco_job.sh')
     loop = _between(s, 'end=$(( $(date +%s) + TMIN*60 ))', 'stage agent export')
     assert len(re.findall(r'quick bash -c', loop)) == 1
     q = next(l for l in s.splitlines() if l.startswith('quick(){'))
-    assert '--auto-start-server=false' not in q and re.search(r'timeout (-k \d+ )?\d+ discobox', q)
+    assert re.search(r'timeout (-k \d+ )?\d+ discobox --auto-start-server=false shell', q)
 
 
 # The shutdown check: only stopping, offline or no answer (D-Bus gone), or /run/nologin; a host still starting is not

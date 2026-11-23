@@ -3,4 +3,4 @@ Description=Refresh the Discobox Claude WIF token (@CLAUDE_SECRET@)
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/discobox secret refresh @CLAUDE_SECRET@ --run
+ExecStart=%h/.local/bin/discobox --auto-start-server=false secret refresh @CLAUDE_SECRET@ --run
